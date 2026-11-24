@@ -7,16 +7,18 @@ curve events. The orders returned for a batch execute two slots later, so
 this bot only acts on flow it has already seen confirmed in the events of
 previous batches, never on a single hopeful print.
 
-Strategy in one paragraph: watch every young coin's trade flow. When a
-coin is still young in slot age, has printed enough trades, its buy quote
-volume clearly dominates its sell quote volume, and its real quote
-reserves grew across the last two batches, buy a fixed small stake. Then
-get out fast: sell the whole position into a take-profit band, cut it at
-a stop-loss, or time-stop it once it has sat too long, whichever comes
-first. Near the end of the window stop opening positions entirely, since
-leftovers are flattened at the final marks. Small stakes, few open
-positions, quick exits: the aim is many modest round trips across many
-distinct coins rather than one heroic hold.
+Strategy in one paragraph: watch every young coin's trade flow, and be
+ruthlessly selective about acting on it. A coin earns a buy only while it
+is still young in slot age, after at least twenty prints inside the flow
+window whose buy quote volume is at least ninety percent of the total,
+and while its real quote reserves grew across the last two batches. The
+stake is deliberately tiny (0.012 SOL) and at most one new buy goes out
+per batch, because every order pays a fixed transaction fee plus curve
+fees: in this replay most flow is noise, so the edge comes from trading
+rarely and cheaply, not from trading often. Exits sell the whole position
+at a +20% take-profit, cut it at a -8% stop-loss, or time-stop it after
+900 slots, whichever comes first. Near the end of the window stop opening
+positions entirely, since leftovers are flattened at the final marks.
 
 Determinism: no clock, no environment, no randomness. Every decision is a
 pure function of the hello and the batches seen so far, and every dict is
@@ -34,21 +36,21 @@ import makefun_bot  # noqa: E402
 SOL = makefun_bot.LAMPORTS_PER_SOL
 
 # --- sizing -------------------------------------------------------------
-STAKE_LAMPORTS = SOL // 20            # 0.05 SOL per position
+STAKE_LAMPORTS = SOL * 12 // 1000     # 0.012 SOL per position: keep fee drag tiny
 MIN_CAP_LAMPORTS = SOL // 50          # size cap must allow >= 0.02 SOL
 CASH_RESERVE_LAMPORTS = SOL // 10     # 0.10 SOL always kept back for fees
-MAX_NEW_BUYS_PER_BATCH = 2
+MAX_NEW_BUYS_PER_BATCH = 1
 
 # --- entry gates ----------------------------------------------------------
 MAX_COIN_AGE_SLOTS = 4000             # only young coins, in slot age
 FLOW_WINDOW_SLOTS = 600               # flow counts only the last ~600 slots
-MIN_TRADES = 8                        # enough prints in the window
-MIN_BUY_SHARE_BPS = 7000              # buys >= 70% of window quote volume
+MIN_TRADES = 20                       # heavy confirmed flow only
+MIN_BUY_SHARE_BPS = 9000              # buys >= 90% of window quote volume
 
 # --- exits ----------------------------------------------------------------
 TAKE_PROFIT_BPS = 2000                # sell at +20% mark gain
-STOP_LOSS_BPS = 1200                  # cut at -12% mark loss
-MAX_HOLD_SLOTS = 1200                 # time-stop: recycle stale positions
+STOP_LOSS_BPS = 800                   # cut at -8% mark loss
+MAX_HOLD_SLOTS = 900                  # time-stop: recycle stale positions
 
 # --- late window ------------------------------------------------------------
 # A 24h replay at Solana's ~0.4s slot time spans roughly 216k slots.
@@ -210,16 +212,18 @@ def entry_orders(state, batch, budget, slots_left):
         curve = state.curves.get(mint)
         if curve is None or curve.complete:
             continue
-        if batch["slot"] - note.first_slot > MAX_COIN_AGE_SLOTS:
+        born = curve.created_slot if curve.created_slot is not None else note.first_slot
+        if batch["slot"] - born > MAX_COIN_AGE_SLOTS:
             continue
-        trades, buy_quote, sell_quote = window_flow(note, batch["slot"])
-        if trades < MIN_TRADES:
-            continue
-        total_quote = buy_quote + sell_quote
-        if total_quote <= 0:
-            continue
-        if buy_quote * 10000 < total_quote * MIN_BUY_SHARE_BPS:
-            continue
+        if MIN_TRADES > 0 or MIN_BUY_SHARE_BPS > 0:
+            trades, buy_quote, sell_quote = window_flow(note, batch["slot"])
+            if trades < MIN_TRADES:
+                continue
+            total_quote = buy_quote + sell_quote
+            if total_quote <= 0:
+                continue
+            if buy_quote * 10000 < total_quote * MIN_BUY_SHARE_BPS:
+                continue
         # Reserves must be growing across consecutive batches, not just
         # churned: the trail's newest close above the one before it, so
         # net new SOL is actually entering the curve.
